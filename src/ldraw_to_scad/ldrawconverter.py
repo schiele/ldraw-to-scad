@@ -7,6 +7,7 @@ import pkg_resources
 
 
 LIB_SCAD = pkg_resources.resource_filename(__name__, 'lib.scad')
+SOLIDS_SCAD = pkg_resources.resource_filename(__name__, 'solids.scad')
 
 
 class LDrawConverter:
@@ -24,10 +25,35 @@ class LDrawConverter:
             'commented': True}
         self.mpd_main = None
         self.index = self.index_library()
+        self.solids = self.parse_solids()
 
     def set(self, key, value):
         """ change a setting """
         self.settings[key] = value
+
+    def parse_solids(self):
+        """ Parse solid definitions. """
+        with open(SOLIDS_SCAD, encoding="utf-8") as filedata:
+            lines = filedata.readlines()
+        key = None
+        dict = {}
+        for line in lines:
+            sline = line.strip() if key is None else line.rstrip()
+            if key is None and sline[:7] != 'solid__':
+                continue
+            if key is None:
+                pos = sline.index('=')
+                key = 'ldraw_lib__' + sline[7:pos].strip()
+                dict[key] = 'realsolid ? '
+                sline = sline[pos+1:].strip()
+            if sline and sline[-1] == ';':
+                dict[key] += sline[:-1].rstrip() + ' : '
+                key = None
+                continue
+            dict[key] += sline + '\n'
+        if key is not None:
+            print(f'Syntax error in {SOLIDS_SCAD}')
+        return dict
 
     def colorfile(self):
         """ Translate color specifications. """
@@ -153,12 +179,12 @@ class LDrawConverter:
             else:
                 result.append("];")
                 intfile_name = LDrawConverter.make_function_name(intfile)
-                result.append(f"function {intfile_name}() = [")
+                result.append(f"function {intfile_name}(realsolid=false) = [")
         if len(params) >= 2 and params[1] == 'NOFILE':
             intfile = self.get_dummy()
             result.append("];")
             intfile_name = LDrawConverter.make_function_name(intfile)
-            result.append(f"function {intfile_name}() = [")
+            result.append(f"function {intfile_name}(realsolid=false) = [")
 
     def convert_line(self, part_line):
         """ Translate a single line. """
@@ -176,7 +202,7 @@ class LDrawConverter:
                 params[1] = str(int(params[1], 0))
             result.append(
                 f"  [{','.join(params[:14])}, "
-                f"{LDrawConverter.make_function_name(keyname)}()],")
+                f"{LDrawConverter.make_function_name(keyname)}(realsolid)],")
         elif params[0] in ["2", "3", "4", "5"]:
             if params[1][0:3] == '0x2':
                 params[1] = str(int(params[1], 0))
@@ -191,6 +217,10 @@ class LDrawConverter:
             else os.path.relpath(os.path.join(*comp), path))
         return f'use <{relpath}.scad>'
 
+    def solidstub(self, function_name):
+        """ Substitute solids. """
+        return self.solids[function_name] if function_name in self.solids else ''
+
     def process_lines(self, name, path, lines):
         """ Translate all lines of a file. """
         self.filedep = (set(), set())
@@ -202,20 +232,21 @@ class LDrawConverter:
         if self.settings['selfcontained']:
             for file in self.get_deps():
                 self.enqueue(file, path)
-            result = [f"function {function_name}() = ["] + result + ["];"]
+            result = [f"function {function_name}(realsolid=false) = {self.solidstub(function_name)}["] + result + ["];"]
         else:
             result = [self.include(['lib'], path)] + \
                      [self.include(self.find_part(name), path)
                       for name in sorted(self.get_deps())] + \
-                     [f"function {function_name}() = ["] + result + ["];"] + \
+                     [f"$fa=1; $fs=0.2;"] + \
+                     [f"function {function_name}(realsolid=false) = {self.solidstub(function_name)}["] + result + ["];"] + \
                      [f"module {function_name}(step=0, col=false, unit=2/5, "
                       f"alt=false, line=0.2, solid=!$preview)"] + \
-                     [f"    makepoly({function_name}(), step=step, col=col, "
+                     [f"    makepoly({function_name}(solid), step=step, col=col, "
                       f"unit=unit, alt=alt, line=line, solid=solid);"] + \
                      [f"{function_name}(line={self.settings['line']});"]
         if self.mpd_main and self.mpd_main != name:
             main_function = LDrawConverter.make_function_name(self.mpd_main)
-            result.append(f"function {main_function}() = {function_name}();")
+            result.append(f"function {main_function}(realsolid=false) = {function_name}(realsolid);")
             result.append(f"module {main_function}(step=0, col=false, "
                           f"unit=2/5, alt=false, line=0.2, solid=!$preview)")
             result.append(f"    {function_name}(step=step, col=col, "
